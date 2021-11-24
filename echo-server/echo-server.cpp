@@ -18,25 +18,23 @@ void perror(const char* msg) { fprintf(stderr, "%s %ld\n", msg, GetLastError());
 #endif // WIN32
 
 void usage() {
-	cout << "syntax: tc <ip> <port>\n";
-	cout << "sample: tc 127.0.0.1 1234\n";
+	cout << "syntax : echo-server <port> [-e[-b]]\n";
+	cout << "sample : echo-server 1234\n";
 }
 
 struct Param {
-	struct in_addr ip;
-	uint16_t port{0};
+	bool echo{ false };
+	uint16_t port{ 0 };
 
 	bool parse(int argc, char* argv[]) {
 		for (int i = 1; i < argc; i++) {
-			int res = inet_pton(AF_INET, argv[i++], &ip);
-			switch (res) {
-				case 1: break;
-				case 0: cerr << "not a valid network address\n"; return false;
-				case -1: perror("inet_pton"); return false;
+			if (strcmp(argv[i], "-e") == 0) {
+				echo = true;
+				continue;
 			}
 			port = stoi(argv[i++]);
 		}
-		return (ip.s_addr != 0) && (port != 0);
+		return port != 0;
 	}
 } param;
 
@@ -54,10 +52,17 @@ void recvThread(int sd) {
 		buf[res] = '\0';
 		cout << buf;
 		cout.flush();
+		if (param.echo) {
+			res = send(sd, buf, res, 0);
+			if (res == 0 || res == -1) {
+				cerr << "send return " << res;
+				perror(" ");
+				break;
+			}
+		}
 	}
 	cout << "disconnected\n";
 	close(sd);
-	exit(0);
 }
 
 int main(int argc, char* argv[]) {
@@ -77,31 +82,43 @@ int main(int argc, char* argv[]) {
 		return -1;
 	}
 
+	int res;
+#ifdef __linux__
+	int optval = 1;
+	res = setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+	if (res == -1) {
+		perror("setsockopt");
+		return -1;
+	}
+#endif // __linux
+
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
 	addr.sin_port = htons(param.port);
-	addr.sin_addr = param.ip;
-	memset(&addr.sin_zero, 0, sizeof(addr.sin_zero));
 
-	int res = connect(sd, (struct sockaddr *)&addr, sizeof(addr));
-	if (res == -1) {
-		perror("connect");
+	ssize_t res2 = ::bind(sd, (struct sockaddr*)&addr, sizeof(addr));
+	if (res2 == -1) {
+		perror("bind");
 		return -1;
 	}
 
-	thread t(recvThread, sd);
-	t.detach();
+	res = listen(sd, 5);
+	if (res == -1) {
+		perror("listen");
+		return -1;
+	}
 
 	while (true) {
-		string s;
-		getline(cin, s);
-		s += "\r\n";
-		ssize_t res = send(sd, s.c_str(), s.size(), 0);
-		if (res == 0 || res == -1) {
-			cerr << "send return " << res;
-			perror(" ");
+		struct sockaddr_in cli_addr;
+		socklen_t len = sizeof(cli_addr);
+		int cli_sd = accept(sd, (struct sockaddr*)&cli_addr, &len);
+		if (cli_sd == -1) {
+			perror("accept");
 			break;
 		}
+		thread* t = new thread(recvThread, cli_sd);
+		t->detach();
 	}
 	close(sd);
 }
